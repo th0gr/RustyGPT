@@ -1,0 +1,12 @@
+[package]
+name = "picorustgpt"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+numpy = "*"
+ndarray = "*"
+pyo3 = "*"
+pyo3-ffi = "*"
+itertools = "*"
+ndarray-stats = "0.5"

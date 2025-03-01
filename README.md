@@ -1,1 +1,1 @@
-This is an implementation of picoGPT in Rust.
+This is an implementation of [picoGPT](https://github.com/jaymody/picoGPT) in Rust.

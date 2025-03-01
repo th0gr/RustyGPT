@@ -6,6 +6,18 @@ use ndarray::{Array2, Axis};
 use numpy::{PyArrayDyn, PyArrayMethods};
 use std::collections::HashMap;
 use std::f32::consts::E;
+use clap::Parser;
+
+#[derive(Parser)]
+#[command(version, about, long_about = None)]
+struct Args {
+    #[arg(short, long)]
+    prompt: String,
+
+    #[arg(short, long, default_value_t = 5)]
+    num_tokens_to_generate: usize,
+}
+
 
 #[derive(Debug)]
 struct Params {
@@ -17,10 +29,7 @@ struct Params {
 
 #[derive(Debug)]
 enum Value {
-    String(String),
-    Bool(bool),
     Int(i64),
-    Float(f32),
     Hashmap(HashMap<String, Value>),
     List(Vec<Value>),
     NumpyArray(Array2<f32>),
@@ -28,7 +37,6 @@ enum Value {
 
 fn extract_hashmap(py_any: &pyo3::Bound<'_, PyAny>) -> PyResult<HashMap<String, Value>> {
     let dict = py_any.downcast::<PyDict>()?;
-    // py_any.extract::<HashMap<String, Value>>()
 
     let mut result = HashMap::new();
 
@@ -42,42 +50,24 @@ fn extract_hashmap(py_any: &pyo3::Bound<'_, PyAny>) -> PyResult<HashMap<String, 
             for item in list.iter() {
                 if let Ok(dict) = item.downcast::<PyDict>() {
                     vec.push(Value::Hashmap(extract_hashmap(&dict)?));
-                } else if let Ok(f) = item.extract::<f32>() {
-                    vec.push(Value::Float(f));
                 } else if let Ok(i) = item.extract::<i64>() {
                     vec.push(Value::Int(i));
-                } else if let Ok(s) = item.extract::<String>() {
-                    vec.push(Value::String(s));
-                } else if let Ok(b) = item.extract::<bool>() {
-                    vec.push(Value::Bool(b));
                 }
             }
             Value::List(vec)
         } else if let Ok(py_arr) = value.extract::<Py<PyArrayDyn<f32>>>() {
-            let mut array = Python::with_gil(|py| {
+            let array = Python::with_gil(|py| {
                 let array_ref = py_arr.bind(py);
-                // println!("array: {:?}", array_ref);
                 let mut res = array_ref.readonly().as_array().to_owned().into_dyn();
                 if res.ndim() != 2 {
                     res = res.insert_axis(Axis(1));
                 }
-                //.into_dyn().into_dimensionality::<ndarray::Dim<[usize; 2]>>();
                 res.into_dimensionality::<ndarray::Dim<[usize; 2]>>()
                     .unwrap()
             });
-            // if array.ndim() != 2 {
-            //     array = array.insert_axis(Axis(1));
-            // }
-            // println!("array: {:?}", array);
             Value::NumpyArray(array)
         } else if let Ok(i) = value.extract::<i64>() {
             Value::Int(i)
-        } else if let Ok(f) = value.extract::<f32>() {
-            Value::Float(f)
-        } else if let Ok(s) = value.extract::<String>() {
-            Value::String(s)
-        } else if let Ok(b) = value.extract::<bool>() {
-            Value::Bool(b)
         } else {
             continue;
         };
@@ -96,27 +86,13 @@ fn layer_norm(x: Array2<f32>, g: &Value, b: &Value, eps: f32) -> Result<Array2<f
         Value::NumpyArray(arr) => arr,
         other => Err(format!("Expected Hashmap for b, got {:?}", other))?,
     };
-    // println!("x is {:?}", x);
-    // println!("g is {:?}", g);
-    // println!("b is {:?}", b);
+
     // mean is n_seq. Have to insert axis to add back second dimension to make it n_seq x 1
     // which allows proper broadcasting when we substract mean and divide by var + eps.
     // each row (i.e. each token) gets normalized independently
     let mean = x.mean_axis(Axis(1)).unwrap().insert_axis(Axis(1));
-    // println!("Mean is {:?}", mean);
     let var = x.var_axis(Axis(1), 0.).insert_axis(Axis(1)); // n_seq x 1
-    // println!("Var is {:?}", var);
     let x_norm = (x - mean) / (var + eps).sqrt();
-    // println!("x_norm is {:?}", x_norm);
-    // println!("g[0] is {:?}", g.clone().flatten());
-    // println!(
-    //     "g * x_norm is {:?}",
-    //     g.clone().flatten().to_owned() * x_norm.clone()
-    // );
-    // println!(
-    //     "g * x_norm + b is {:?}",
-    //     g.clone().flatten().to_owned() * x_norm.clone() + b.flatten()
-    // );
     Ok(g.flatten().to_owned() * x_norm + b.flatten())
 }
 
@@ -129,9 +105,6 @@ fn linear(x: Array2<f32>, w: &Value, b: &Value) -> Result<Array2<f32>, String> {
         Value::NumpyArray(arr) => arr,
         other => Err(format!("Expected NumpyArray for b, got {:?}", other))?,
     };
-    // println!("x is {:?}", x);
-    // println!("w is {:?}", w);
-    // println!("b is {:?}", b);
     Ok(x.dot(w) + b.flatten())
 }
 
@@ -174,28 +147,11 @@ fn ffn(x: Array2<f32>, c_fc: &Value, c_proj: &Value) -> Result<Array2<f32>, Stri
 }
 
 fn attention(q: &Array2<f32>, k: &Array2<f32>, v: &Array2<f32>, mask: &Array2<f32>) -> Array2<f32> {
-    // let (int, _) = (q.dot(&k.t()) / ((q.dim().1) as f32).sqrt() + mask).into_raw_vec_and_offset();
-    // let first_calc = q.dot(&k.t());
-    // println!("first_calc is {:?}", first_calc);
-    // let square_root = (q.dim().1 as f32).sqrt();
-    // println!("square_root is {:?}", square_root);
-    // let second_calc = first_calc.clone() / square_root;
-    // println!("second_calc is {:?}", second_calc);
-    // let third_calc = second_calc + mask;
-    // println!("third_calc is {:?}", third_calc);
-    // let int = (q.dot(&k.t())) / (q.dim().1 as f32).sqrt() + mask;
-    // println!("int is {:?}", int);
-    // let res = softmax(int);
-    // println!("res is {:?}", res);
-    // let fin = res.dot(v);
-    // println!("final is {:?}", fin);
     softmax((q.dot(&k.t())) / (q.dim().1 as f32).sqrt() + mask).dot(v)
-    // softmax(q.dot(&k.t()) / ((q.dim().1) as f32).sqrt() + mask).dot(v);
 }
 
 // c_attn contains the weights and biases for q, k and v in th the attention module.
 fn mha(x: Array2<f32>, c_attn: &Value, c_proj: &Value, n_head: i64) -> Result<Array2<f32>, String> {
-    // println!("In MHA");
     let c_attn = match c_attn {
         Value::Hashmap(hash) => hash,
         other => Err(format!("Expected Hashmap for c_attn, got {:?}", other))?,
@@ -204,14 +160,10 @@ fn mha(x: Array2<f32>, c_attn: &Value, c_proj: &Value, n_head: i64) -> Result<Ar
         Value::Hashmap(hash) => hash,
         other => Err(format!("Expected Hashmap for c_proj, got {:?}", other))?,
     };
-    // println!("x before linear operation is {:?}", x);
+
     let x = linear(x, &c_attn["w"], &c_attn["b"]).unwrap();
-    // println!("x after linear operation is {:?}", x);
-    // qkv_heads = list(map(lambda x: np.split(x, n_head, axis=-1), np.split(x, 3, axis=-1)))
     // First split x into 3 parts along the last axis (q, k, v)
-    // println!("x shape is {:?}", x.shape());
     let qkv = x.axis_chunks_iter(Axis(1), x.shape()[1] / 3);
-    // println!("qkv is {:?}", qkv);
     // Then split each of those parts into n_head pieces
     let qkv_heads: Vec<Vec<Array2<f32>>> = qkv
         .map(|chunk| {
@@ -222,11 +174,8 @@ fn mha(x: Array2<f32>, c_attn: &Value, c_proj: &Value, n_head: i64) -> Result<Ar
         })
         .collect();
 
-    // println!("qkv_heads is {:?}", qkv_heads);
-
     // Create causal mask to hide future tokens from being attended to.
     // Causal mask is a square matrix of shape (seq_len, seq_len) where the left diagonal side is 1 and the rest is -1e10.
-    // TODO: should this be 1
     let seq_len = x.shape()[0];
     let mut causal_mask = Array2::<f32>::zeros((seq_len, seq_len));
     for i in 0..seq_len {
@@ -234,22 +183,16 @@ fn mha(x: Array2<f32>, c_attn: &Value, c_proj: &Value, n_head: i64) -> Result<Ar
             causal_mask[[i, j]] = -1e10;
         }
     }
-    // println!("Causal Mask is {:?}", causal_mask);
 
     let mut out_heads: Vec<Array2<f32>> = Vec::new();
     for (q, k, v) in multizip((qkv_heads[0].iter(), qkv_heads[1].iter(), qkv_heads[2].iter())) {
-        // println!("Q is {:?}", q);
-        // println!("K is {:?}", k);
-        // println!("V is {:?}", v);
         out_heads.push(attention(q, k, v, &causal_mask));
     }
-    // println!("out_heads is {:?}", out_heads);
+
     // merge heads
     let merged_out_heads = ndarray::concatenate(Axis(1), &out_heads.iter().map(|x| x.view()).collect::<Vec<_>>()).unwrap();
-    // println!("Concatenated is {:?}", merged_out_heads);
     // out projection
     let x = linear(merged_out_heads, &c_proj["w"], &c_proj["b"]).unwrap();
-    // println!("output of mha is {:?}", x);
     Ok(x)
 }
 
@@ -261,15 +204,12 @@ fn transformer_block(
     ln_2: &HashMap<String, Value>,
     n_head: i64,
 ) -> Array2<f32> {
-    // println!("In Transformer Block...");
+
     // TODO: is there a way to remove the clone?
     let normalized_x = layer_norm(x.clone(), &ln_1["g"], &ln_1["b"], 1e-5).unwrap();
-    // println!("Layer Norm is {:?}", normalized_x);
     let mha_out = x + mha(normalized_x, &attn["c_attn"], &attn["c_proj"], n_head).unwrap();
-    // println!("MHA_Out is {:?}", mha_out);
     let normalized_mha_out = layer_norm(mha_out.clone(), &ln_2["g"], &ln_2["b"], 1e-5).unwrap();
     let ffn_out = ffn(normalized_mha_out, &mlp["c_fc"], &mlp["c_proj"]).unwrap();
-    // println!("FFN_Out is {:?}", ffn_out);
     mha_out + ffn_out
 }
 
@@ -281,13 +221,6 @@ fn gpt2(
     ln_f: &HashMap<String, Value>,
     n_head: i64,
 ) -> Result<Array2<f32>, String> {
-    // println!("In GPT2");
-    // println!("inputs: {:?}", inputs);
-    // println!("wte: {:?}", wte);
-    // println!("wpe: {:?}", wpe);
-    // println!("blocks: {:?}", blocks);
-    // println!("ln_f: {:?}", ln_f);
-    // println!("n_head: {:?}", n_head);
 
     // lookup the embeddings for the input tokens in the wte (word token embedding) matrix
     let indices: Vec<usize> = inputs.iter().map(|&x| x as usize).collect();
@@ -297,7 +230,6 @@ fn gpt2(
     let position_emb = wpe.select(Axis(0), &indices);
     // combine the token embeddings and positional embeddings
     let mut x = token_embed + position_emb;
-    // println!("x: {:?}", x);
     for block in blocks {
         let this_block = match block {
             Value::Hashmap(map) => map,
@@ -334,8 +266,6 @@ fn generate(
     n_head: i64,
     n_tokens_to_generate: usize,
 ) -> Vec<i64> {
-    // println!("In Generate...");
-    // println!("blocks: {:?}", params["blocks"]);
     let wte = match &params["wte"] {
         Value::NumpyArray(arr) => arr,
         _ => panic!("Expected NumpyArray"),
@@ -376,8 +306,10 @@ fn generate(
 
 fn main() -> PyResult<()> {
     pyo3::prepare_freethreaded_python();
-    // println!("Starting up...");
-    let prompt = "Alan Turing theorized that computers would one day become";
+    let args = Args::parse();
+    println!("args: {:?}", args.prompt);
+    // let prompt = "Alan Turing theorized that computers would one day become";
+    let prompt = args.prompt;
     let n_tokens_to_generate = 5;
 
     // load encoder, hparams, and params from the released open-ai gpt-2 files
@@ -388,9 +320,7 @@ fn main() -> PyResult<()> {
     let from_python: Py<PyAny> = Python::with_gil(|py| -> PyResult<Py<PyAny>> {
         let module = PyModule::from_code(py, py_foo, c_str!("utils.py"), c_str!("utils.py"))?;
         let func = module.getattr("load_encoder_hparams_and_params")?;
-        // println!("Calling Python function...");
         let result = func.call1(("124M", "models"))?;
-        // println!("Result from Python: {:?}", result);
         Ok(result.into())
     })?;
 
@@ -403,14 +333,9 @@ fn main() -> PyResult<()> {
         let hparams = tuple.get_item(1)?;
         let params = tuple.get_item(2)?;
 
-        // println!("encoder: {:?}", encoder);
-        // println!("hparams: {:?}", hparams);
-        // println!("params: {:?}", params);
-
         // encode the input string using the BPE tokenizer
         let input_ids = encoder.call_method1("encode", (prompt,))?;
         let input_ids_vec = input_ids.extract()?;
-        // println!("input ids: {:?}", input_ids);
 
         let new_hparams = extract_hashmap(&hparams);
         let new_params = extract_hashmap(&params);
@@ -425,8 +350,6 @@ fn main() -> PyResult<()> {
         Ok(model_params)
     })?;
 
-    // println!("Model params are {:?}", model_params);
-    // println!("hparams are {:?}", model_params.hparams);
     // make sure we we are not suprassing the max sequence length of our model
     let n_ctx = match model_params.hparams["n_ctx"] {
         Value::Int(x) => x,
@@ -436,14 +359,11 @@ fn main() -> PyResult<()> {
     assert!(input_ids.len() + n_tokens_to_generate < n_ctx as usize);
 
     let output_ids = generate(input_ids, model_params.params, 12, n_tokens_to_generate);
-    // let output_ids = vec![15496, 11, 995, 0];
     Python::with_gil(|py| -> PyResult<_> {
         let encoder = model_params.encoder.bind(py);
         let output_ids = encoder.call_method1("decode", (output_ids,))?;
         println!("output_ids: {:?}", output_ids);
         Ok(())
     })?;
-
-    // println!("finished");
     Ok(())
 }

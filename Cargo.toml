@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-numpy = "*"
-ndarray = "*"
-pyo3 = "*"
-pyo3-ffi = "*"
-itertools = "*"
-ndarray-stats = "0.5"
+numpy = "0.23.0"
+ndarray = "0.16.1"
+pyo3 = "0.23.5"
+pyo3-ffi = "0.23.5"
+itertools = "0.14.0"
+clap = { version = "4.5.31", features = ["derive"] }

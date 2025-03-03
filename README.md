@@ -19,6 +19,8 @@ For example:
 cargo run --  --prompt "Alan Turing theorized that computers would one day become" --n-tokens-to-generate 10
 ```
 
+The n-tokens-to-generate argument is optional. If not provided, the program will generate 5 tokens.
+
 For faster performance, you can compile the program for release:
 ```
 cargo build --release

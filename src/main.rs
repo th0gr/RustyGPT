@@ -116,6 +116,17 @@ fn layer_norm(x: Array2<f32>, g: &Value, b: &Value, eps: f32) -> Result<Array2<f
     Ok(g.flatten().to_owned() * x_norm + b.flatten())
 }
 
+
+/// Applies a linear transformation to the input tensor `x` using the provided
+/// weight `w` and bias `b` parameters.
+///
+/// # Arguments
+/// - `x`: The input tensor of shape `(n_seq, n_embd)`.
+/// - `w`: The weight tensor of shape `(n_embd, n_out)`.
+/// - `b`: The bias tensor of shape `(n_out,)`.
+///
+/// # Returns
+/// The transformed tensor of shape `(n_seq, n_out)`.
 fn linear(x: Array2<f32>, w: &Value, b: &Value) -> Result<Array2<f32>, String> {
     let w = match w {
         Value::NumpyArray(arr) => arr,
@@ -128,6 +139,22 @@ fn linear(x: Array2<f32>, w: &Value, b: &Value) -> Result<Array2<f32>, String> {
     Ok(x.dot(w) + b.flatten())
 }
 
+
+/// Applies the softmax function to the input 2D tensor `array`.
+/// 
+/// The softmax function is applied to each row of the input tensor independently.
+/// The softmax function is defined as:
+/// 
+/// `softmax(x_i) = exp(x_i) / sum(exp(x_j))`
+/// 
+/// where `x_i` is the i-th element of the input tensor.
+///
+/// # Arguments
+/// - `array`: The input 2D tensor of shape `(n_seq, n_embd)`.
+///
+/// # Returns
+/// The transformed 2D tensor of the same shape as the input, with each row
+/// containing the softmax of the corresponding row in the input.
 pub fn softmax(mut array: Array2<f32>) -> Array2<f32> {
     for mut row in array.axis_iter_mut(Axis(0)) {
         for value in &mut row {
@@ -143,12 +170,42 @@ pub fn softmax(mut array: Array2<f32>) -> Array2<f32> {
     array
 }
 
+/// Applies the Gaussian Error Linear Unit (GELU) activation function to the
+/// input tensor `x`.
+///
+/// The GELU activation function is defined as:
+///
+/// `gelu(x) = 0.5 * x * (1.0 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))`
+///
+/// It applies the GELU activation function to each element of the input
+/// tensor `x`.
+///
+/// # Arguments
+/// - `x`: The input tensor of shape `(n_seq, n_embd)`.
+///
+/// # Returns
+/// The transformed tensor of the same shape as the input, with the GELU
+/// activation function applied to each element.
 fn gelu(x: Array2<f32>) -> Array2<f32> {
     let sqrt_2_pi = (2.0f32 / std::f32::consts::PI).sqrt();
     // use mapv to apply the function to each element of the array
     x.mapv(|x| 0.5 * x * (1.0 + (sqrt_2_pi * (x + 0.044715 * x.powi(3))).tanh()))
 }
 
+/// Applies a feed-forward neural network (FFN) to the input tensor `x`.
+///
+/// The FFN consists of two linear transformations with a GELU activation
+/// function in between.
+///
+/// # Arguments
+/// - `x`: The input tensor of shape `(n_seq, n_embd)`.
+/// - `c_fc`: A hashmap containing the weights and biases for the first linear
+/// transformation. Shape is `(n_embd, 4 * n_embd)`.
+/// - `c_proj`: A hashmap containing the weights and biases for the second 
+/// linear transformation. Shape is `(4 * n_embd, n_embd)`.
+///
+/// # Returns
+/// The transformed tensor of the same shape as the input, after applying the FFN.
 fn ffn(x: Array2<f32>, c_fc: &Value, c_proj: &Value) -> Result<Array2<f32>, String> {
     let c_fc = match c_fc {
         Value::Hashmap(hash) => hash,
@@ -164,11 +221,41 @@ fn ffn(x: Array2<f32>, c_fc: &Value, c_proj: &Value) -> Result<Array2<f32>, Stri
     Ok(ffn2)
 }
 
+/// Computes the attention mechanism over the input tensors `q`, `k`, and `v`,
+/// using the provided `mask`.
+///
+/// # Arguments
+/// - `q`: The query tensor of shape `(n_seq, n_embd)`.
+/// - `k`: The key tensor of shape `(n_seq, n_embd)`.
+/// - `v`: The value tensor of shape `(n_seq, n_embd)`.
+/// - `mask`: The attention mask tensor of shape `(n_seq, n_seq)`.
+///
+/// # Returns
+/// The transformed tensor of shape `(n_seq, n_embd)`, after applying the
+/// attention mechanism.
 fn attention(q: &Array2<f32>, k: &Array2<f32>, v: &Array2<f32>, mask: &Array2<f32>) -> Array2<f32> {
     softmax((q.dot(&k.t())) / (q.dim().1 as f32).sqrt() + mask).dot(v)
 }
 
-// c_attn contains the weights and biases for q, k and v in th the attention module.
+/// Applies the multi-head attention (MHA) mechanism to the input tensor `x`.
+///
+/// The MHA mechanism first linearly transforms the input `x` using the weights
+/// and biases specified in `c_attn`. It then splits the transformed tensor
+/// into `n_head` parts along the last axis, computes the attention mechanism
+/// on each part, and concatenates the results.
+///
+/// # Arguments
+/// - `x`: The input tensor of shape `(n_seq, n_embd)`.
+/// - `c_attn`: A hashmap containing the weights and biases for the linear 
+/// transformation applied to `x`. q, k, and v are combined in c_attn. shape
+/// is `(n_embd, 3 * n_embd)`
+/// - `c_proj`: A hashmap containing the weights and biases for the final 
+/// linear transformation. shape is `(n_embd, n_embd)`
+/// - `n_head`: The number of attention heads to use.
+///
+/// # Returns
+/// The transformed tensor of the same shape as the input, after applying the 
+/// MHA mechanism.
 fn mha(x: Array2<f32>, c_attn: &Value, c_proj: &Value, n_head: i64) -> Result<Array2<f32>, String> {
     let c_attn = match c_attn {
         Value::Hashmap(hash) => hash,
@@ -193,7 +280,8 @@ fn mha(x: Array2<f32>, c_attn: &Value, c_proj: &Value, n_head: i64) -> Result<Ar
         .collect();
 
     // Create causal mask to hide future tokens from being attended to.
-    // Causal mask is a square matrix of shape (seq_len, seq_len) where the left diagonal side is 1 and the rest is -1e10.
+    // Causal mask is a square matrix of shape (seq_len, seq_len) where the 
+    // left diagonal side is 1 and the rest is -1e10.
     let seq_len = x.shape()[0];
     let mut causal_mask = Array2::<f32>::zeros((seq_len, seq_len));
     for i in 0..seq_len {
@@ -222,6 +310,30 @@ fn mha(x: Array2<f32>, c_attn: &Value, c_proj: &Value, n_head: i64) -> Result<Ar
     Ok(x)
 }
 
+
+/// Applies a transformer block to the input tensor `x`.
+///
+/// A transformer block consists of a multi-head attention layer followed by a
+/// feedforward network. The input tensor `x` is first normalized using layer
+/// normalization, then passed through the multi-head attention layer. The
+/// output is normalized again and passed through the feedforward network. 
+/// The outputs of these two layers are added sequentally to the original input
+/// `x`.
+///
+/// Parameters:
+/// - `x`: The input tensor of shape `(seq_len, emb_dim)`.
+/// - `mlp`: A hashmap containing the weights and biases for the feedforward
+/// network.
+/// - `attn`: A hashmap containing the weights and biases for the multi-head
+/// attention layer.
+/// - `ln_1`: A hashmap containing the layer normalization parameters for the 
+/// first layer normalization.
+/// - `ln_2`: A hashmap containing the layer normalization parameters for the 
+/// second layer normalization.
+/// - `n_head`: The number of attention heads.
+///
+/// Returns:
+/// The output tensor of shape `(seq_len, emb_dim)`.
 fn transformer_block(
     x: Array2<f32>,
     mlp: &HashMap<String, Value>,
@@ -238,6 +350,21 @@ fn transformer_block(
     mha_out + ffn_out
 }
 
+/// Applies the GPT-2 model to the given input tokens.
+///
+/// This function takes a vector of input token IDs, along with various model
+/// parameters, and applies the GPT-2 model to generate the output logits.
+///
+/// Parameters:
+/// - `inputs`: A vector of input token IDs.
+/// - `wte`: The word token embedding matrix.
+/// - `wpe`: The word position embedding matrix.
+/// - `blocks`: A vector of transformer block parameters.
+/// - `ln_f`: The final layer normalization parameters.
+/// - `n_head`: The number of attention heads.
+///
+/// Returns:
+/// The output logits as a 2D array.
 fn gpt2(
     inputs: &Vec<i64>,
     wte: &Array2<f32>,
@@ -279,13 +406,24 @@ fn gpt2(
             other => Err(format!("Expected Hashmap for ln_2, got {:?}", other))?,
         };
         x = transformer_block(x, mlp, attn, ln_1, ln_2, n_head);
-        // println!("x after transformer_block: {:?}", x);
     }
     Ok(layer_norm(x, &ln_f["g"], &ln_f["b"], 1e-5)
         .unwrap()
         .dot(&wte.t()))
 }
 
+/// Generates a sequence of tokens using a pre-trained GPT-2 model.
+///
+/// # Arguments
+/// - `inputs`: The initial input sequence of tokens.
+/// - `params`: A HashMap containing the model parameters, including the
+/// word token embeddings, word position embeddings, transformer blocks, 
+/// and layer normalization parameters.
+/// - `n_head`: The number of attention heads in the transformer blocks.
+/// - `n_tokens_to_generate`: The number of tokens to generate.
+///
+/// # Returns
+/// A vector of generated token IDs.
 fn generate(
     mut inputs: Vec<i64>,
     params: HashMap<String, Value>,
@@ -337,7 +475,6 @@ fn main() -> PyResult<()> {
     println!("args: {:?}", args.prompt);
     let prompt = args.prompt;
     let n_tokens_to_generate = args.n_tokens_to_generate;
-    // let n_tokens_to_generate = 5;
 
     // load encoder, hparams, and params from the released open-ai gpt-2 files
     let py_foo = c_str!(include_str!(concat!(

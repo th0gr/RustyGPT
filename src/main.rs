@@ -1,12 +1,12 @@
-use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyModule};
+use clap::Parser;
 use itertools::multizip;
-use pyo3_ffi::c_str;
 use ndarray::{Array2, Axis};
 use numpy::{PyArrayDyn, PyArrayMethods};
+use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyList, PyModule};
+use pyo3_ffi::c_str;
 use std::collections::HashMap;
 use std::f32::consts::E;
-use clap::Parser;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -15,9 +15,8 @@ struct Args {
     prompt: String,
 
     #[arg(short, long, default_value_t = 5)]
-    num_tokens_to_generate: usize,
+    n_tokens_to_generate: usize,
 }
-
 
 #[derive(Debug)]
 struct Params {
@@ -35,6 +34,12 @@ enum Value {
     NumpyArray(Array2<f32>),
 }
 
+/// Extracts a HashMap from a PyAny object, recursively handling nested 
+/// dictionaries, lists, and NumPy arrays.
+/// 
+/// This function is used to convert Python data structures into a 
+/// Rust-friendly representation, where the `Value` enum is used to represent
+/// the various data types.
 fn extract_hashmap(py_any: &pyo3::Bound<'_, PyAny>) -> PyResult<HashMap<String, Value>> {
     let dict = py_any.downcast::<PyDict>()?;
 
@@ -76,7 +81,22 @@ fn extract_hashmap(py_any: &pyo3::Bound<'_, PyAny>) -> PyResult<HashMap<String, 
     Ok(result)
 }
 
-// x is n_seq x n_embd (i.e. n_seq x 768 for gpt2)
+/// Applies layer normalization to the input tensor `x` using the provided
+/// scale `g` and bias `b` parameters.
+///
+/// The layer normalization is performed independently for each row (token)
+/// of the input tensor `x`. The mean and variance are computed along the
+/// feature dimension (axis 1 for each row) and then used to normalize each
+/// row.
+///
+/// # Arguments
+/// - `x`: The input tensor of shape `(n_seq, n_embd)` (n_seq x 768 for gpt2).
+/// - `g`: The scale parameter of shape `(n_embd,)`.
+/// - `b`: The bias parameter of shape `(n_embd,)`.
+/// - `eps`: A small constant added to the variance to ensure numerical stability.
+///
+/// # Returns
+/// The normalized tensor of shape `(n_seq, n_embd)`.
 fn layer_norm(x: Array2<f32>, g: &Value, b: &Value, eps: f32) -> Result<Array2<f32>, String> {
     let g = match g {
         Value::NumpyArray(arr) => arr,
@@ -126,9 +146,7 @@ pub fn softmax(mut array: Array2<f32>) -> Array2<f32> {
 fn gelu(x: Array2<f32>) -> Array2<f32> {
     let sqrt_2_pi = (2.0f32 / std::f32::consts::PI).sqrt();
     // use mapv to apply the function to each element of the array
-    x.mapv(|x| {
-        0.5 * x * (1.0 + (sqrt_2_pi * (x + 0.044715 * x.powi(3))).tanh())
-    })
+    x.mapv(|x| 0.5 * x * (1.0 + (sqrt_2_pi * (x + 0.044715 * x.powi(3))).tanh()))
 }
 
 fn ffn(x: Array2<f32>, c_fc: &Value, c_proj: &Value) -> Result<Array2<f32>, String> {
@@ -185,12 +203,20 @@ fn mha(x: Array2<f32>, c_attn: &Value, c_proj: &Value, n_head: i64) -> Result<Ar
     }
 
     let mut out_heads: Vec<Array2<f32>> = Vec::new();
-    for (q, k, v) in multizip((qkv_heads[0].iter(), qkv_heads[1].iter(), qkv_heads[2].iter())) {
+    for (q, k, v) in multizip((
+        qkv_heads[0].iter(),
+        qkv_heads[1].iter(),
+        qkv_heads[2].iter(),
+    )) {
         out_heads.push(attention(q, k, v, &causal_mask));
     }
 
     // merge heads
-    let merged_out_heads = ndarray::concatenate(Axis(1), &out_heads.iter().map(|x| x.view()).collect::<Vec<_>>()).unwrap();
+    let merged_out_heads = ndarray::concatenate(
+        Axis(1),
+        &out_heads.iter().map(|x| x.view()).collect::<Vec<_>>(),
+    )
+    .unwrap();
     // out projection
     let x = linear(merged_out_heads, &c_proj["w"], &c_proj["b"]).unwrap();
     Ok(x)
@@ -204,7 +230,6 @@ fn transformer_block(
     ln_2: &HashMap<String, Value>,
     n_head: i64,
 ) -> Array2<f32> {
-
     // TODO: is there a way to remove the clone?
     let normalized_x = layer_norm(x.clone(), &ln_1["g"], &ln_1["b"], 1e-5).unwrap();
     let mha_out = x + mha(normalized_x, &attn["c_attn"], &attn["c_proj"], n_head).unwrap();
@@ -221,7 +246,6 @@ fn gpt2(
     ln_f: &HashMap<String, Value>,
     n_head: i64,
 ) -> Result<Array2<f32>, String> {
-
     // lookup the embeddings for the input tokens in the wte (word token embedding) matrix
     let indices: Vec<usize> = inputs.iter().map(|&x| x as usize).collect();
     let token_embed = wte.select(Axis(0), &indices);
@@ -257,7 +281,9 @@ fn gpt2(
         x = transformer_block(x, mlp, attn, ln_1, ln_2, n_head);
         // println!("x after transformer_block: {:?}", x);
     }
-    Ok(layer_norm(x, &ln_f["g"], &ln_f["b"], 1e-5).unwrap().dot(&wte.t()))
+    Ok(layer_norm(x, &ln_f["g"], &ln_f["b"], 1e-5)
+        .unwrap()
+        .dot(&wte.t()))
 }
 
 fn generate(
@@ -293,7 +319,8 @@ fn generate(
         // get the last row (i.e. the last token)
         let last_row = logits.row(logits.nrows() - 1);
         // argmax
-        let next_id = last_row.iter()
+        let next_id = last_row
+            .iter()
             .enumerate()
             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
             .map(|(index, _)| index)
@@ -308,9 +335,9 @@ fn main() -> PyResult<()> {
     pyo3::prepare_freethreaded_python();
     let args = Args::parse();
     println!("args: {:?}", args.prompt);
-    // let prompt = "Alan Turing theorized that computers would one day become";
     let prompt = args.prompt;
-    let n_tokens_to_generate = 5;
+    let n_tokens_to_generate = args.n_tokens_to_generate;
+    // let n_tokens_to_generate = 5;
 
     // load encoder, hparams, and params from the released open-ai gpt-2 files
     let py_foo = c_str!(include_str!(concat!(
